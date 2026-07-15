@@ -1,4 +1,4 @@
-# Enabling Flexibility in Robotics Assembly Sequence Generation
+# Enabling Flexibility in PLC-Controlled Robots Assembly Sequence Generation
 
 **Geometry-driven Assembly Sequence Planning from STEP CAD Models — a bridge between digital product design and executable manufacturing/PLC control knowledge**
 
