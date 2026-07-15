@@ -126,30 +126,7 @@ The disassembly order is generated first, then reversed to obtain the assembly o
 | Output format | **JSON** process plan |
 | Development/target hardware for case study | Festo Linear Axis Robot, XTS Transport System, UR5, KUKA-SCARA |
 
-**Repository structure (suggested for this repo):**
 
-```
-├── src/
-│   ├── geometry_extraction.py     # STEP import, solid filtering, bounding boxes, volumes
-│   ├── contact_detection.py       # pairwise intersection / contact graph
-│   ├── fastener_identification.py # geometric heuristics for functional roles
-│   ├── dependency_graph.py        # precedence + support constraint construction
-│   ├── accessibility_check.py     # collision-based feasibility evaluation
-│   ├── sequence_planner.py        # iterative assembly/disassembly sequence generator
-│   └── process_plan_export.py     # JSON task/sub-task/action structuring
-├── models/
-│   └── battery_module.step        # case-study CAD assembly
-├── results/
-│   ├── assembly_sequence.txt
-│   └── process_plan.json
-├── docs/
-│   └── thesis.pdf
-└── README.md
-```
-
-*(Adjust to match your actual file names before pushing to GitHub.)*
-
----
 
 ## 6. Case Study: Battery Module Assembly
 
@@ -206,7 +183,7 @@ The disassembly order is generated first, then reversed to obtain the assembly o
 
 ## 10. Keywords
 
-`assembly sequence planning` · `CAD-based reasoning` · `STEP (ISO 10303)` · `FreeCAD` · `Python` · `collision detection` · `geometric reasoning` · `modular manufacturing systems` · `robotics` · `battery module assembly` · `digital manufacturing` · `automation engineering`
+`PLC Programming` . `assembly sequence planning` · `CAD-based reasoning` · `STEP (ISO 10303)` · `FreeCAD` · `Python` · `collision detection` · `geometric reasoning` · `modular manufacturing systems` · `robotics` · `battery module assembly` · `digital manufacturing` · `automation engineering`
 
 ## 11. References
 
