@@ -1,0 +1,673 @@
+# =============================================================================
+# AUTOMATIC CAD -> ASSEMBLY -> ROBOT PROCESS PLAN GENERATOR
+#
+# This script analyses a STEP assembly in FreeCAD and automatically generates:
+# 1) Geometry diagnostics
+# 2) Disassembly planner
+# 3) Assembly sequence
+# 4) Robot task containers
+# 5) JSON process plan for FESTO + UR5 + XTS system
+# ==============================================================================
+
+import FreeCAD as App
+import ImportGui   #loads the STEP importer module
+import json
+from collections import Counter
+
+
+# =============================================================================
+# STAGE 1 — LOAD STEP FILE
+# Load the CAD assembly into a new FreeCAD document
+# =============================================================================
+
+file_path = r"C:\Users\Monish\Desktop\CAD PRODUCT DESIGN\screwed_version_with_4_screws.step"
+
+doc = App.newDocument("AssemblyAnalysis")  # FreeCAD = App
+ImportGui.insert(file_path, doc.Name)
+App.ActiveDocument.recompute()  
+# recalculates the geometry tree by forcing the model to fully load
+
+print("Document loaded:", doc.Name)
+print("Number of objects:", len(doc.Objects))  
+#returns all the object inside the STEP file
+
+
+# =============================================================================
+# STAGE 2 — EXTRACT REAL SOLID PARTS
+# Filters STEP entities and keeps only valid solid bodies
+# =============================================================================
+
+parts = []
+#creates an empty list
+
+for obj in doc.Objects:
+    if hasattr(obj, "Shape") and len(obj.Shape.Solids) == 1: 
+#checks whether the object has a property or not
+        parts.append(obj)
+
+print("Real solid parts:", len(parts))  
+#returns the real solid parts only
+
+
+# =============================================================================
+# STAGE 3 — PART VOLUMES
+# Displays volume of each part to understand assembly structure
+# =============================================================================
+
+print("\nPart volumes (mm³):")
+
+volumes = {}
+
+for i, p in enumerate(parts, 1):
+
+    v = round(p.Shape.Volume,3) 
+# calculates the volume of the solid part and rounded to 3 decimals
+    volumes[p.Name] = v
+
+    print(f"{i:2d} {p.Name:20} {v:12.3f}")
+
+
+# =============================================================================
+# STAGE 4 — BOUNDING BOX COMPUTATION
+# Bounding boxes help estimate part size and assembly stacking direction
+# =============================================================================
+
+print("\nPart bounding boxes:")
+
+bbox = {}
+
+for p in parts:
+
+    bb = p.Shape.BoundBox 
+#computes the bounding box of the shape
+    bbox[p.Name] = bb
+
+    info = {
+        "name": p.Name,
+        "center": (round(bb.Center.x,2), round(bb.Center.y,2), round(bb.Center.z,2)),
+        "size": (round(bb.XLength,2), round(bb.YLength,2), round(bb.ZLength,2))
+    }
+
+    print(info)
+
+
+# =============================================================================
+# STAGE 5 — CONTACT DETECTION
+# Detects geometric intersections between parts to infer assembly relations
+# =============================================================================
+
+contacts = {p.Name: [] for p in parts}
+
+for i,a in enumerate(parts):
+    for j,b in enumerate(parts):
+
+        if i >= j:
+            continue
+
+        common = a.Shape.common(b.Shape)
+#it computes the geometric intersection of two shapes i.e. FreeCAD boolean operation
+
+        if common.Volume > 0.05:
+            contacts[a.Name].append(b.Name)
+            contacts[b.Name].append(a.Name)
+
+print("\nDetected contacts:")
+
+for k,v in contacts.items():
+    if v:
+        print(f"{k:20} ↔ {', '.join(v)}")
+    else:
+        print(f"{k:20} (isolated)")
+
+
+# =============================================================================
+# STAGE 6 — FASTENER IDENTIFICATION
+# Screws are detected based on volume, aspect ratio and number of contacts
+# =============================================================================
+
+vol_list = sorted([p.Shape.Volume for p in parts])
+#builds a list of volumes
+median_vol = vol_list[len(vol_list)//2]
+
+fasteners = []
+
+for p in parts:
+
+    bb = p.Shape.BoundBox
+    dims = [bb.XLength, bb.YLength, bb.ZLength]
+
+    aspect = max(dims)/(min(dims)+1e-6)
+    vol = p.Shape.Volume
+    contact_cnt = len(contacts[p.Name])
+#counts how many part touches this part
+
+    if vol < 0.25*median_vol and aspect > 2.2 and contact_cnt >= 2:
+        fasteners.append(p.Name)
+
+print("\nDetected fasteners:", fasteners)
+
+
+# =============================================================================
+# STAGE 7 — DISASSEMBLY DEPENDENCIES
+# Determines which parts must be removed before others
+# =============================================================================
+
+dependencies = {p.Name:set() for p in parts}
+
+for f in fasteners:
+    for c in contacts[f]:
+        dependencies[c].add(f)
+#adds fasteners as the dependency of the connected part
+
+print("\nDisassembly dependencies (must remove first):")
+
+for k,v in dependencies.items():
+    if v:
+        print(f"{k:20} ← {list(v)}")
+
+
+# =============================================================================
+# STAGE 8 — ASSEMBLY DEPENDENCIES
+# Reverse of disassembly relations used for assembly planning
+# =============================================================================
+
+assembly_deps = {p.Name:set() for p in parts}
+
+for part,depset in dependencies.items():
+    for d in depset:
+        assembly_deps[d].add(part)
+#reverses the relation
+
+print("\nAssembly dependencies (must place BEFORE):")
+
+for k,v in assembly_deps.items():
+    if v:
+        print(f"{k:20} → {list(v)}")
+
+
+# =============================================================================
+# STAGE 9 -DISASSEMBLY PLANNER
+# Generates removal order based on dependencies and vertical stacking
+# =============================================================================
+
+layer = {}
+
+for p in parts:
+    layer[p.Name] = bbox[p.Name].Center.z
+
+remaining = {p.Name:p for p in parts}
+deps = {k:set(v) for k,v in dependencies.items()}
+
+sequence_stage12 = []
+
+while remaining:
+
+    ready = [n for n in remaining if not deps.get(n)]
+
+    ready.sort(key=lambda n: layer[n], reverse=True)
+
+    chosen = ready[0]
+
+    sequence_stage12.append(chosen)
+
+    remaining.pop(chosen)
+
+    for v in deps.values():
+        v.discard(chosen)
+
+    deps.pop(chosen,None)
+
+print("\nSTAGE 9 FINAL PLAN:\n")
+
+for i,s in enumerate(sequence_stage12,1):
+    print(i,s)
+
+
+# =============================================================================
+# STAGE 10 — AUTOMATIC PART CLASSIFICATION
+# Identifies plates, cells and screws automatically
+# =============================================================================
+
+volume_counts = Counter(round(v,0) for v in volumes.values())
+
+cell_volume = None
+
+for v,count in volume_counts.items():
+    if count > 10:
+        cell_volume = v
+
+cells = [p for p,v in volumes.items() if round(v,0)==cell_volume]
+
+sorted_parts = sorted(volumes.items(), key=lambda x: x[1], reverse=True)
+
+plates = [p for p,_ in sorted_parts[:3]]
+
+plates_sorted = sorted(plates, key=lambda p: bbox[p].Center.z)
+
+bottom_plate = plates_sorted[0]
+middle_plate = plates_sorted[1]
+top_plate = plates_sorted[2]
+
+bottom_screws = []
+top_screws = []
+
+for s in fasteners:
+
+    c = contacts[s]
+
+    if bottom_plate in c and middle_plate in c:
+        bottom_screws.append(s)
+
+    if middle_plate in c and top_plate in c:
+        top_screws.append(s)
+
+
+# =============================================================================
+# STAGE 11 — GENERATE ASSEMBLY SEQUENCE
+# Recreates logical assembly workflow from CAD analysis
+# =============================================================================
+
+assembly_sequence = []
+
+assembly_sequence.append(f"ROTATE {middle_plate}")
+assembly_sequence.append(f"PLACE {middle_plate}")
+
+assembly_sequence.append(f"ROTATE {bottom_plate}")
+assembly_sequence.append(f"PLACE {bottom_plate} ON {middle_plate}")
+
+for s in bottom_screws:
+    assembly_sequence.append(f"INSERT {s}")
+
+assembly_sequence.append("ROTATE SUBASSEMBLY")
+
+for c in cells:
+    assembly_sequence.append(f"PLACE {c}")
+
+assembly_sequence.append(f"PLACE {top_plate}")
+
+for s in top_screws:
+    assembly_sequence.append(f"INSERT {s}")
+
+print("\nASSEMBLY SEQUENCE:\n")
+
+for i,step in enumerate(assembly_sequence,1):
+    print(i,step)
+
+
+# =============================================================================
+# STAGE 12 — PROCESS PLAN WITH TASK CONTAINERS
+# Generates robot-level task hierarchy for FESTO + UR5 + XTS system
+# =============================================================================
+
+process_plan = {
+    "tasks": []
+}
+
+# Task containers
+task_ground_middle = {
+    "task": "Assemble the Ground and Middle",
+    "subtasks": []
+}
+
+task_cells = {
+    "task": "Assemble the 20 battery cells",
+    "subtasks": []
+}
+
+task_lid = {
+    "task": "Assemble the Middle and Lid",
+    "subtasks": []
+}
+
+
+# -----------------------------------------------------------------------------
+# Robot action mapping
+# Converts subtask names → correct robot commands
+# -----------------------------------------------------------------------------
+
+def robot_actions(subtask_name):
+
+    if "Place middle part" in subtask_name:
+        return [
+            "XTS_Request_Middle_Part()",
+            "FESTO_Move_To_Pick_Middle()",
+            "FESTO_Grip_Middle()",
+            "FESTO_Place_Middle()"
+        ]
+
+    if "Assemble ground with middle" in subtask_name:
+        return [
+            "XTS_Request_Ground_Part()",
+            "FESTO_Move_To_Ground()",
+            "FESTO_Grip_Ground()",
+            "FESTO_Move_To_Assembly()",
+            "FESTO_Insert_Ground_Into_Middle()"
+        ]
+
+    if "Insert bottom screw" in subtask_name:
+        return [
+            "FESTO_Pick_Screw_023()",
+            "FESTO_Tighten_Screw()",
+            "FESTO_Pick_Screw_024()",
+            "FESTO_Tighten_Screw()"
+        ]
+
+    if "Turn workpiece" in subtask_name:
+        return [
+            "Activate_Rotary_Fixture()",
+            "Rotate_Workpiece_180()"
+        ]
+
+    if "Insert battery cell" in subtask_name:
+        return [
+            "UR5_Insert_Cell_Row_1()",
+            "UR5_Insert_Cell_Row_2()",
+            "UR5_Insert_Cell_Row_3()",
+            "UR5_Insert_Cell_Row_4()"
+        ]
+
+    if "Place module on UR5 station" in subtask_name:
+        return [
+            "XTS_Request_Empty_Carrier()",
+            "FESTO_Place_Module_On_Carrier()",
+            "XTS_Move_To_UR5_Station()"
+        ]
+
+    if "Return module to FESTO station" in subtask_name:
+        return [
+            "XTS_Request_Empty_Carrier()",
+            "UR5_Place_Module_On_Carrier()",
+            "XTS_Move_To_FESTO_Station()"
+        ]
+
+    if "Assemble lid with middle" in subtask_name:
+        return [
+            "XTS_Request_Lid()",
+            "FESTO_Pick_Lid()",
+            "FESTO_Place_Lid()"
+        ]
+
+    if "Insert top screw" in subtask_name:
+        return [
+            "FESTO_Pick_Screw_025()",
+            "FESTO_Tighten_Screw()",
+            "FESTO_Pick_Screw_026()",
+            "FESTO_Tighten_Screw()"
+        ]
+
+    return []
+
+
+# -----------------------------------------------------------------------------
+# Interpret assembly sequence → generate process plan
+# -----------------------------------------------------------------------------
+
+cells_started = False
+
+for step in assembly_sequence:
+
+    if "ROTATE" in step:
+
+        subtask = {
+            "name": "Turn workpiece",
+            "actions": robot_actions("Turn workpiece")
+        }
+
+        task_ground_middle["subtasks"].append(subtask)
+
+    elif "PLACE" in step:
+
+        part = step.split()[1]
+
+        if part == middle_plate:
+
+            subtask = {
+                "name": "Place middle part in assembly region",
+                "actions": robot_actions("Place middle part")
+            }
+
+            task_ground_middle["subtasks"].append(subtask)
+
+        elif part == bottom_plate:
+
+            subtask = {
+                "name": "Assemble ground with middle",
+                "actions": robot_actions("Assemble ground with middle")
+            }
+
+            task_ground_middle["subtasks"].append(subtask)
+
+        elif part in cells:
+
+            if not cells_started:
+
+                task_cells["subtasks"].append({
+                    "name": "Place module on UR5 station",
+                    "actions": robot_actions("Place module on UR5 station")
+                })
+
+                task_cells["subtasks"].append({
+                    "name": "UR5 assemble battery rows",
+                    "actions": robot_actions("Insert battery cell")
+                })
+
+                task_cells["subtasks"].append({
+                    "name": "Return module to FESTO station",
+                    "actions": robot_actions("Return module to FESTO station")
+                })
+
+                cells_started = True
+
+        elif part == top_plate:
+
+            subtask = {
+                "name": "Assemble lid with middle",
+                "actions": robot_actions("Assemble lid with middle")
+            }
+
+            task_lid["subtasks"].append(subtask)
+
+    elif "INSERT" in step:
+
+        screw = step.split()[1]
+
+        if screw in bottom_screws:
+
+            subtask = {
+                "name": f"Insert bottom screw {screw}",
+                "actions": robot_actions("Insert bottom screw")
+            }
+
+            task_ground_middle["subtasks"].append(subtask)
+
+        elif screw in top_screws:
+
+            subtask = {
+                "name": f"Insert top screw {screw}",
+                "actions": robot_actions("Insert top screw")
+            }
+
+            task_lid["subtasks"].append(subtask)
+
+
+# -----------------------------------------------------------------------------
+# Add tasks to process plan
+# -----------------------------------------------------------------------------
+
+process_plan["tasks"].append(task_ground_middle)
+process_plan["tasks"].append(task_cells)
+process_plan["tasks"].append(task_lid)
+
+# =============================================================================
+# STAGE 13 — EXPORT JSON PROCESS PLAN
+# =============================================================================
+
+import json
+import os
+
+# Choose your preferred save location
+json_folder = r"C:\Users\Monish\Desktop"
+json_filename = "assembly_process_plan.json"
+json_path = os.path.join(json_folder, json_filename)
+
+json_output = json.dumps(process_plan, indent=4)
+
+print("\nFULL PROCESS PLAN (JSON):\n")
+print(json_output)
+
+with open(json_path, "w", encoding="utf-8") as f:
+    f.write(json_output)
+
+print(f"\n JSON file successfully saved as:")
+print(f"   {json_path}")
+
+
+
+# =============================================================================
+# STAGE 14 — ANIMATION VIDEO GENERATOR 
+# Bottom screws neglected • Parts descend from top • Subassembly rotates as one rigid body
+# Imported STEP file moved much higher • Safe saveImage with Front view
+# =============================================================================
+
+import time
+import os
+from FreeCAD import Vector, Rotation, Placement
+import FreeCADGui as Gui
+
+# -------------------------- SETTINGS --------------------------
+frame_dir = r"C:\Users\Monish\Desktop\assembly_animation_frames"
+os.makedirs(frame_dir, exist_ok=True)
+
+ANIMATION_SPEED = 0.018
+STEPS_PER_MOVE  = 28
+Z_APPROACH      = 250.0          # descent height from top
+
+ROTATION_ANGLE  = 180.0
+ROTATION_AXIS   = Vector(0, 1, 0)
+ROTATION_CENTER = bbox[middle_plate].Center
+
+frame_counter = 0
+
+def save_frame():
+    global frame_counter
+    view = Gui.activeView()
+    if view is None:
+        print("Warning: No active view found, skipping frame")
+        return
+    filepath = os.path.join(frame_dir, f"frame_{frame_counter:04d}.png")
+    view.saveImage(filepath, 1920, 1080, "White")
+    frame_counter += 1
+
+def linear_move(obj, start_placement, end_placement, steps):
+    for i in range(steps + 1):
+        t = i / steps
+        pos = start_placement.Base * (1 - t) + end_placement.Base * t
+        rot = start_placement.Rotation.slerp(end_placement.Rotation, t)
+        obj.Placement = Placement(pos, rot)
+        App.ActiveDocument.recompute()
+        Gui.updateGui()
+        save_frame()
+        time.sleep(ANIMATION_SPEED)
+
+def rotate_subassembly_as_rigid(sub_parts, angle, axis, center):
+    rot = Rotation(axis, angle)
+    for p in sub_parts:
+        old = p.Placement
+        new_pos = center + rot * (old.Base - center)
+        new_rot = rot * old.Rotation
+        p.Placement = Placement(new_pos, new_rot)
+    App.ActiveDocument.recompute()
+    Gui.updateGui()
+    for _ in range(22):
+        save_frame()
+        time.sleep(ANIMATION_SPEED * 1.1)
+
+# -------------------------- SET CLEAN FRONT VIEW --------------------------
+print("Setting clean Front orthographic view...")
+
+Gui.SendMsgToActiveView("ViewFront")
+Gui.activeDocument().activeView().setCameraType("Orthographic")
+Gui.SendMsgToActiveView("ViewFit")
+Gui.updateGui()
+time.sleep(0.6)
+
+# -------------------------- PREPARE MODEL --------------------------
+final_placement = {p.Name: p.Placement for p in parts}
+
+# Parts we actually animate (bottom screws neglected)
+animated_parts = [middle_plate, bottom_plate] + cells + [top_plate] + top_screws
+pre_rotation_parts = [middle_plate, bottom_plate]
+
+# Push ALL imported parts much higher so they don't clutter the animation
+for p in parts:
+    final = final_placement[p.Name]
+    high_pos = final.Base + Vector(0, 0, 380.0)   # even higher for cleaner view
+    p.Placement = Placement(high_pos, final.Rotation)
+
+# Pre-rotation placement for middle & bottom plate
+inv_rot = Rotation(ROTATION_AXIS, -ROTATION_ANGLE)
+pre_rotation_placement = {}
+for name in pre_rotation_parts:
+    old = final_placement[name]
+    new_pos = ROTATION_CENTER + inv_rot * (old.Base - ROTATION_CENTER)
+    new_rot = inv_rot * old.Rotation
+    pre_rotation_placement[name] = Placement(new_pos, new_rot)
+
+# Set animated parts to high starting position (descend from top)
+for name in animated_parts:
+    obj = next(p for p in parts if p.Name == name)
+    target = pre_rotation_placement.get(name, final_placement[name])
+    supply = Placement(target.Base + Vector(0, 0, Z_APPROACH), target.Rotation)
+    obj.Placement = supply
+
+App.ActiveDocument.recompute()
+Gui.updateGui()
+Gui.SendMsgToActiveView("ViewFit")
+time.sleep(0.5)
+
+print("Clean animation starting...")
+
+# -------------------------- RUN ANIMATION --------------------------
+assembled_sub = []
+
+for step in assembly_sequence:
+    print("Animating:", step)
+    
+    if "ROTATE" in step and "SUBASSEMBLY" in step:
+        rotate_subassembly_as_rigid(assembled_sub, ROTATION_ANGLE, ROTATION_AXIS, ROTATION_CENTER)
+        assembled_sub = []
+        continue
+
+    elif "PLACE" in step:
+        part_name = step.split()[1]
+        if part_name not in animated_parts:
+            continue
+        obj = next(p for p in parts if p.Name == part_name)
+        
+        target = final_placement[part_name]
+        if part_name in pre_rotation_placement:
+            target = pre_rotation_placement[part_name]
+        
+        start = Placement(target.Base + Vector(0, 0, Z_APPROACH), target.Rotation)
+        linear_move(obj, start, target, STEPS_PER_MOVE)
+        
+        if part_name in pre_rotation_parts:
+            assembled_sub.append(obj)
+
+    elif "INSERT" in step:
+        screw_name = step.split()[1]
+        if screw_name not in animated_parts:
+            continue
+        obj = next(p for p in parts if p.Name == screw_name)
+        final = final_placement[screw_name]
+        start = Placement(final.Base + Vector(0, 0, Z_APPROACH), final.Rotation)
+        linear_move(obj, start, final, STEPS_PER_MOVE)
+
+# Final hold
+Gui.SendMsgToActiveView("ViewFit")
+for _ in range(40):
+    save_frame()
+    time.sleep(0.04)
+
+print(f"\n ANIMATION COMPLETED")
+
